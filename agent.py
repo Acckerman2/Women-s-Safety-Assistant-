@@ -258,47 +258,52 @@ You have access to the following tools. **ALWAYS use the appropriate tools** to 
 
 def _sanitize_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
     """
-    Fix duplicate tool_call IDs that cause Mistral API 400 errors.
-    Also ensures every ToolMessage references a valid tool_call ID.
+    Aggressively fix duplicate tool_call IDs that cause Mistral API 400 errors.
+
+    Strategy: assign a FRESH unique ID to every single tool_call encountered,
+    and remap the corresponding ToolMessage.tool_call_id references.  This
+    guarantees zero collisions regardless of how LangGraph accumulates messages.
+    Also cleans additional_kwargs["tool_calls"] which langchain-mistralai uses.
     """
-    seen_ids: set[str] = set()
-    id_remap: dict[str, str] = {}  # old_id -> new_id
+    id_remap: dict[str, str] = {}   # old_id -> new_id
     sanitized: list[BaseMessage] = []
 
     for msg in messages:
-        # --- AIMessage with tool_calls: deduplicate IDs ---
-        if isinstance(msg, AIMessage) and hasattr(msg, "tool_calls") and msg.tool_calls:
+        # --- AIMessage with tool_calls: give every call a fresh ID ---
+        if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
             new_tool_calls = []
-            needs_fix = False
             for tc in msg.tool_calls:
-                tc_id = tc.get("id", "")
-                if tc_id in seen_ids:
-                    # Duplicate — create a new unique ID
-                    new_id = f"call_{uuid.uuid4().hex[:24]}"
-                    id_remap[tc_id] = new_id
-                    new_tool_calls.append({**tc, "id": new_id})
-                    needs_fix = True
-                else:
-                    seen_ids.add(tc_id)
-                    new_tool_calls.append(tc)
-            if needs_fix:
-                # Rebuild AIMessage with fixed tool_calls
-                msg = AIMessage(
-                    content=msg.content or "",
-                    tool_calls=new_tool_calls,
-                    additional_kwargs=msg.additional_kwargs,
-                )
+                old_id = tc.get("id", "") or ""
+                new_id = f"call_{uuid.uuid4().hex[:24]}"
+                id_remap[old_id] = new_id
+                new_tool_calls.append({**tc, "id": new_id})
+
+            # Also fix additional_kwargs["tool_calls"] if present
+            new_kwargs = dict(msg.additional_kwargs) if msg.additional_kwargs else {}
+            if "tool_calls" in new_kwargs and isinstance(new_kwargs["tool_calls"], list):
+                fixed_ak = []
+                for ak_tc in new_kwargs["tool_calls"]:
+                    ak_id = ak_tc.get("id", "") or ""
+                    mapped = id_remap.get(ak_id, f"call_{uuid.uuid4().hex[:24]}")
+                    fixed_ak.append({**ak_tc, "id": mapped})
+                new_kwargs["tool_calls"] = fixed_ak
+
+            msg = AIMessage(
+                content=msg.content or "",
+                tool_calls=new_tool_calls,
+                additional_kwargs=new_kwargs,
+            )
             sanitized.append(msg)
 
-        # --- ToolMessage: remap ID if its parent was remapped ---
+        # --- ToolMessage: remap to its parent's new ID ---
         elif isinstance(msg, ToolMessage):
-            tc_id = getattr(msg, "tool_call_id", "")
-            if tc_id in id_remap:
-                msg = ToolMessage(
-                    content=msg.content,
-                    tool_call_id=id_remap[tc_id],
-                    name=getattr(msg, "name", ""),
-                )
+            old_tc_id = getattr(msg, "tool_call_id", "") or ""
+            new_tc_id = id_remap.get(old_tc_id, old_tc_id)
+            msg = ToolMessage(
+                content=msg.content,
+                tool_call_id=new_tc_id,
+                name=getattr(msg, "name", ""),
+            )
             sanitized.append(msg)
 
         else:
@@ -318,10 +323,22 @@ def agent_node(state: AgentState) -> dict:
     if not messages or not isinstance(messages[0], SystemMessage):
         messages = [SystemMessage(content=SYSTEM_PROMPT)] + messages
 
-    # Sanitize to fix duplicate tool_call IDs (Mistral API 400 error)
+    # Sanitize ALL tool_call IDs to fresh UUIDs (fixes Mistral API 400 error)
     messages = _sanitize_messages(messages)
 
-    response = llm_with_tools.invoke(messages)
+    # Retry once: if Mistral still complains, strip all tool context and retry
+    try:
+        response = llm_with_tools.invoke(messages)
+    except Exception as e:
+        if "Duplicate tool call id" in str(e) or "3230" in str(e):
+            # Nuclear option: strip all tool-related messages and retry
+            clean = [m for m in messages
+                     if isinstance(m, (SystemMessage, HumanMessage))
+                     or (isinstance(m, AIMessage) and m.content and not getattr(m, "tool_calls", None))]
+            response = llm_with_tools.invoke(clean)
+        else:
+            raise
+
     return {"messages": [response]}
 
 
@@ -394,7 +411,14 @@ def chat(user_message: str, history: list[BaseMessage] | None = None) -> str:
             # Skip ToolMessage and AIMessage without content (pure tool-call msgs)
     messages.append(HumanMessage(content=user_message))
 
-    result = graph.invoke({"messages": messages})
+    try:
+        result = graph.invoke({"messages": messages})
+    except Exception as e:
+        if "Duplicate tool call id" in str(e) or "3230" in str(e):
+            # Last resort: send only the current message with no history
+            result = graph.invoke({"messages": [HumanMessage(content=user_message)]})
+        else:
+            raise
 
     # Get the last AI message (skip tool messages)
     ai_messages = [m for m in result["messages"] if isinstance(m, AIMessage) and m.content]
