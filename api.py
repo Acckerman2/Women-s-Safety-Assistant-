@@ -77,7 +77,8 @@ body{font-family:'Inter',sans-serif;background:#f5f3ff;color:#333;display:flex;h
 
 /* Sidebar */
 .sidebar{width:300px;background:linear-gradient(180deg,#fff5f5 0%,#f8f0ff 50%,#fff 100%);border-right:1px solid #ece3f6;overflow-y:auto;padding:1.2rem;flex-shrink:0}
-.sidebar h2{font-size:1.3rem;color:#9b1b30;margin-bottom:0.2rem}
+.sidebar h2{font-size:1.3rem;color:#9b1b30;margin-bottom:0.2rem;cursor:pointer;transition:opacity 0.2s}
+.sidebar h2:hover{opacity:0.7}
 .sidebar .sub{font-size:0.8rem;color:#888;margin-bottom:1rem;font-style:italic}
 .sidebar hr{border:none;border-top:1px solid #ece3f6;margin:0.8rem 0}
 .s-card{background:#fff;border:1px solid #ece3f6;border-radius:12px;padding:0.9rem;margin-bottom:0.7rem;box-shadow:0 2px 6px rgba(0,0,0,0.03)}
@@ -89,10 +90,13 @@ body{font-family:'Inter',sans-serif;background:#f5f3ff;color:#333;display:flex;h
 .main{flex:1;display:flex;flex-direction:column;min-width:0}
 
 /* Header */
-.hero{background:linear-gradient(135deg,#ff6b35 0%,#d63384 50%,#6f42c1 100%);padding:1.3rem 1.5rem 1rem;text-align:center;flex-shrink:0}
-.hero h1{color:#fff;font-size:1.8rem;font-weight:700}
+.hero{background:linear-gradient(135deg,#ff6b35 0%,#d63384 50%,#6f42c1 100%);padding:1.3rem 1.5rem 1rem;text-align:center;flex-shrink:0;position:relative}
+.hero h1{color:#fff;font-size:1.8rem;font-weight:700;cursor:pointer;transition:opacity 0.2s}
+.hero h1:hover{opacity:0.85}
 .hero p{color:rgba(255,255,255,0.92);font-size:0.95rem;margin-top:0.3rem;font-weight:300}
 .hero .badge{display:inline-block;background:rgba(255,255,255,0.2);padding:0.15rem 0.7rem;border-radius:20px;font-size:0.75rem;color:#fff;margin-top:0.4rem;font-weight:500}
+.back-btn{position:absolute;left:1rem;top:50%;transform:translateY(-50%);background:rgba(255,255,255,0.2);border:1px solid rgba(255,255,255,0.4);color:#fff;border-radius:10px;padding:0.4rem 0.9rem;font-size:0.8rem;font-weight:600;cursor:pointer;font-family:'Inter',sans-serif;transition:all 0.2s;display:none}
+.back-btn:hover{background:rgba(255,255,255,0.35)}
 
 /* Emergency banner */
 .emergency{background:linear-gradient(90deg,#fee2e2,#fecaca);border:2px solid #f87171;border-radius:12px;padding:0.8rem 1rem;margin:0.8rem 1rem 0;flex-shrink:0}
@@ -151,7 +155,7 @@ body{font-family:'Inter',sans-serif;background:#f5f3ff;color:#333;display:flex;h
 
 <!-- Sidebar -->
 <div class="sidebar">
-    <h2>🛡️ SheShield AI</h2>
+    <h2 onclick="goHome()">🛡️ SheShield AI</h2>
     <p class="sub">India's Women Safety Assistant</p>
     <hr>
     <div class="s-card">
@@ -203,7 +207,8 @@ body{font-family:'Inter',sans-serif;background:#f5f3ff;color:#333;display:flex;h
 <!-- Main content -->
 <div class="main">
     <div class="hero">
-        <h1>🛡️ SheShield AI</h1>
+        <button class="back-btn" id="backBtn" onclick="goHome()">← Home</button>
+        <h1 onclick="goHome()">🛡️ SheShield AI</h1>
         <p>Your trusted AI assistant for women's safety, Indian laws &amp; emergency help</p>
         <span class="badge">🇮🇳 Made for Women in India</span>
     </div>
@@ -243,6 +248,8 @@ const typing = document.getElementById('typing');
 const msgInput = document.getElementById('msgInput');
 const sendBtn = document.getElementById('sendBtn');
 const quickWrap = document.getElementById('quickWrap');
+const backBtn = document.getElementById('backBtn');
+const emergencyBanner = document.querySelector('.emergency');
 
 function addMsg(text, role) {
     const div = document.createElement('div');
@@ -262,8 +269,29 @@ function setLoading(on) {
     if (on) chatArea.scrollTop = chatArea.scrollHeight;
 }
 
-async function sendQuick(text) {
+function goHome() {
+    // Clear chat, reset session, show home screen
+    chatArea.innerHTML = '';
+    sessionId = null;
+    quickWrap.style.display = '';
+    backBtn.style.display = 'none';
+    emergencyBanner.style.display = '';
+    msgInput.value = '';
+    msgInput.focus();
+    // Clear session on server
+    if (sessionId) {
+        fetch('/session/' + sessionId, {method: 'DELETE'}).catch(()=>{});
+    }
+}
+
+function showChatMode() {
     quickWrap.style.display = 'none';
+    backBtn.style.display = 'block';
+    emergencyBanner.style.display = 'none';
+}
+
+async function sendQuick(text) {
+    showChatMode();
     await doSend(text);
 }
 
@@ -271,7 +299,7 @@ async function sendMsg() {
     const text = msgInput.value.trim();
     if (!text) return;
     msgInput.value = '';
-    quickWrap.style.display = 'none';
+    showChatMode();
     await doSend(text);
 }
 
