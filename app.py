@@ -1,14 +1,12 @@
 """
 SheShield AI – Women's Safety Assistant (India)
-Streamlit frontend connected to FastAPI backend.
+Single-page Streamlit app with built-in ReAct agent.
 """
 
 import os
 import streamlit as st
-import requests
-
-# ───────────────────────── API Config ───────────────────────────
-API_URL = os.getenv("API_URL", "http://localhost:8000")
+from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
+from agent import chat
 
 
 # ───────────────────────── Page Config ──────────────────────────
@@ -205,19 +203,14 @@ with st.sidebar:
 
     st.markdown("---")
     if st.button("🗑️ Clear Chat", use_container_width=True):
-        if st.session_state.get("session_id"):
-            try:
-                requests.delete(f"{API_URL}/session/{st.session_state.session_id}", timeout=5)
-            except Exception:
-                pass
         st.session_state.messages = []
-        st.session_state.session_id = None
+        st.session_state.history = []
         st.rerun()
 
     st.markdown(
         "<p style='text-align:center; font-size:0.75rem; color:#aaa; margin-top:1rem;'>"
         "Built with ❤️ for women's safety in India<br>"
-        "Powered by Mistral AI + LangGraph + FastAPI</p>",
+        "Powered by Mistral AI + LangGraph</p>",
         unsafe_allow_html=True,
     )
 
@@ -239,39 +232,33 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# ───────────────────────── Helper: call API ─────────────────────
-def call_api(message: str) -> str:
-    """Send message to FastAPI backend and return the response."""
+# ───────────────────────── Helper: call agent directly ──────────
+def get_agent_response(message: str) -> str:
+    """Call the ReAct agent directly and return the response."""
     try:
-        resp = requests.post(
-            f"{API_URL}/chat",
-            json={
-                "message": message,
-                "session_id": st.session_state.get("session_id"),
-            },
-            timeout=120,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        st.session_state.session_id = data.get("session_id")
-        return data.get("reply", "I'm sorry, I couldn't process that. Please try again.")
-    except requests.exceptions.ConnectionError:
-        return ("⚠️ **Cannot reach the server.** Please make sure the FastAPI backend is running.\n\n"
-                "Run: `python start.py` or `uvicorn api:app --reload` in a terminal.\n\n"
+        history = st.session_state.get("history", [])
+        reply = chat(message, history if history else None)
+        # Update history
+        st.session_state.history.append(HumanMessage(content=message))
+        st.session_state.history.append(AIMessage(content=reply))
+        # Keep history manageable (last 20 messages)
+        if len(st.session_state.history) > 20:
+            st.session_state.history = st.session_state.history[-20:]
+        return reply
+    except Exception as e:
+        return (f"⚠️ An error occurred: {str(e)}\n\n"
                 "Meanwhile, here are emergency numbers:\n"
                 "- 📞 **Emergency (ERSS)**: 112\n"
                 "- 📞 **Police**: 100\n"
                 "- 📞 **Women Helpline**: 181\n"
                 "- 📞 **NCW**: 7827-170-170\n"
                 "- 📞 **Cyber Crime**: 1930")
-    except Exception as e:
-        return f"⚠️ Error communicating with server: {str(e)}"
 
 # ───────────────────────── Session State ────────────────────────
 if "messages" not in st.session_state:
     st.session_state.messages = []
-if "session_id" not in st.session_state:
-    st.session_state.session_id = None
+if "history" not in st.session_state:
+    st.session_state.history = []
 
 # ───────────────────────── Quick Actions ────────────────────────
 QUICK_ACTIONS = [
@@ -300,7 +287,7 @@ if not st.session_state.messages:
             if st.button(label, key=f"qa_{idx}", use_container_width=True):
                 st.session_state.messages.append({"role": "user", "content": prompt})
                 with st.spinner("🛡️ SheShield is thinking..."):
-                    response = call_api(prompt)
+                    response = get_agent_response(prompt)
                 st.session_state.messages.append({"role": "assistant", "content": response})
                 st.rerun()
 
@@ -313,7 +300,7 @@ if not st.session_state.messages:
                 if st.button(label, key=f"qa_{qa_idx}", use_container_width=True):
                     st.session_state.messages.append({"role": "user", "content": prompt})
                     with st.spinner("🛡️ SheShield is thinking..."):
-                        response = call_api(prompt)
+                        response = get_agent_response(prompt)
                     st.session_state.messages.append({"role": "assistant", "content": response})
                     st.rerun()
 
@@ -333,7 +320,7 @@ if not st.session_state.messages:
             prompt = f"Give me all helplines, women's commission contact, and One Stop Centre info for {state}."
             st.session_state.messages.append({"role": "user", "content": prompt})
             with st.spinner("🛡️ Fetching state resources..."):
-                response = call_api(prompt)
+                response = get_agent_response(prompt)
             st.session_state.messages.append({"role": "assistant", "content": response})
             st.rerun()
 
@@ -351,7 +338,7 @@ if user_input := st.chat_input("Ask about Indian laws, helplines, safety tips...
 
     with st.chat_message("assistant", avatar="🛡️"):
         with st.spinner("🛡️ SheShield is thinking..."):
-            response = call_api(user_input)
+            response = get_agent_response(user_input)
         st.markdown(response)
 
     st.session_state.messages.append({"role": "assistant", "content": response})
