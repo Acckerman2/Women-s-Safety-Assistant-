@@ -10,10 +10,11 @@ This module builds a ReAct (Reason + Act) agent that:
 from __future__ import annotations
 
 import os
+import uuid
 from typing import TypedDict, Annotated, Sequence
 
 from dotenv import load_dotenv
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 from langchain_mistralai import ChatMistralAI
 from langgraph.graph import StateGraph, END
@@ -255,6 +256,57 @@ You have access to the following tools. **ALWAYS use the appropriate tools** to 
 
 # ──────────────────────────────  Nodes  ────────────────────────────
 
+def _sanitize_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
+    """
+    Fix duplicate tool_call IDs that cause Mistral API 400 errors.
+    Also ensures every ToolMessage references a valid tool_call ID.
+    """
+    seen_ids: set[str] = set()
+    id_remap: dict[str, str] = {}  # old_id -> new_id
+    sanitized: list[BaseMessage] = []
+
+    for msg in messages:
+        # --- AIMessage with tool_calls: deduplicate IDs ---
+        if isinstance(msg, AIMessage) and hasattr(msg, "tool_calls") and msg.tool_calls:
+            new_tool_calls = []
+            needs_fix = False
+            for tc in msg.tool_calls:
+                tc_id = tc.get("id", "")
+                if tc_id in seen_ids:
+                    # Duplicate — create a new unique ID
+                    new_id = f"call_{uuid.uuid4().hex[:24]}"
+                    id_remap[tc_id] = new_id
+                    new_tool_calls.append({**tc, "id": new_id})
+                    needs_fix = True
+                else:
+                    seen_ids.add(tc_id)
+                    new_tool_calls.append(tc)
+            if needs_fix:
+                # Rebuild AIMessage with fixed tool_calls
+                msg = AIMessage(
+                    content=msg.content or "",
+                    tool_calls=new_tool_calls,
+                    additional_kwargs=msg.additional_kwargs,
+                )
+            sanitized.append(msg)
+
+        # --- ToolMessage: remap ID if its parent was remapped ---
+        elif isinstance(msg, ToolMessage):
+            tc_id = getattr(msg, "tool_call_id", "")
+            if tc_id in id_remap:
+                msg = ToolMessage(
+                    content=msg.content,
+                    tool_call_id=id_remap[tc_id],
+                    name=getattr(msg, "name", ""),
+                )
+            sanitized.append(msg)
+
+        else:
+            sanitized.append(msg)
+
+    return sanitized
+
+
 def agent_node(state: AgentState) -> dict:
     """The ReAct agent node — reasons and decides whether to use tools."""
     llm = get_llm()
@@ -265,6 +317,9 @@ def agent_node(state: AgentState) -> dict:
     # Prepend system prompt if not already there
     if not messages or not isinstance(messages[0], SystemMessage):
         messages = [SystemMessage(content=SYSTEM_PROMPT)] + messages
+
+    # Sanitize to fix duplicate tool_call IDs (Mistral API 400 error)
+    messages = _sanitize_messages(messages)
 
     response = llm_with_tools.invoke(messages)
     return {"messages": [response]}
@@ -327,7 +382,16 @@ def chat(user_message: str, history: list[BaseMessage] | None = None) -> str:
     """
     messages: list[BaseMessage] = []
     if history:
-        messages.extend(history)
+        # Strip tool-related messages from history to avoid
+        # duplicate tool_call ID errors on subsequent turns.
+        # Keep only Human/AI messages that have actual text content.
+        for m in history:
+            if isinstance(m, HumanMessage):
+                messages.append(m)
+            elif isinstance(m, AIMessage) and m.content:
+                # Keep only the text content, drop tool_calls
+                messages.append(AIMessage(content=m.content))
+            # Skip ToolMessage and AIMessage without content (pure tool-call msgs)
     messages.append(HumanMessage(content=user_message))
 
     result = graph.invoke({"messages": messages})
